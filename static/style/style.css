@@ -1,0 +1,60 @@
+:root{
+    --primary:#2E7D32;
+    --secondary:#66BB6A;
+    --gold:#D4A017;
+    --light:#F5F5F5;
+    --dark:#1B5E20;
+}
+
+body{
+    background:#f4f8f4;
+    font-family:Arial, sans-serif;
+}
+
+.navbar{
+    background:var(--primary) !important;
+}
+
+.card{
+    border:none;
+    border-radius:15px;
+    box-shadow:0 2px 10px rgba(0,0,0,.1);
+}
+
+.btn-primary{
+    background:var(--primary);
+    border:none;
+}
+
+.btn-primary:hover{
+    background:var(--dark);
+}
+
+.btn-success{
+    background:var(--gold);
+    border:none;
+}
+
+.btn-success:hover{
+    background:#b8860b;
+}
+
+.logo{
+    width:100px;
+    height:100px;
+    object-fit:contain;
+}
+
+.header-title{
+    color:var(--dark);
+    font-weight:bold;
+}
+
+.table thead{
+    background:var(--primary);
+    color:white;
+}
+
+.dashboard-card{
+    border-left:5px solid var(--gold);
+}
