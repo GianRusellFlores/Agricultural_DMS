@@ -1,720 +1,357 @@
-<<<<<<< HEAD
+from flask import Flask, render_template, request, redirect, url_for
+from flask import flash, session, send_file
+from flask_mysqldb import MySQL
+from werkzeug.security import generate_password_hash
+from werkzeug.security import check_password_hash
+from werkzeug.utils import secure_filename
 import os
 
-os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = "1"
-os.environ["OAUTHLIB_RELAX_TOKEN_SCOPE"] = "1"
-
-from waitress import serve
-from flask import (
-    Flask, render_template, request,
-    redirect, session, flash,
-    send_from_directory, url_for
-)
-
-from flask_dance.contrib.google import (
-    make_google_blueprint, google
-)
-
-from werkzeug.utils import secure_filename
-from config import get_db_connection
-
-# CREATE FLASK APP FIRST
 app = Flask(__name__)
 
-app.secret_key = "agriculture_secret_key"
+app.secret_key = "dms_secret_key"
 
-UPLOAD_FOLDER = "static/uploads"
-app.config["UPLOAD_FOLDER"] = UPLOAD_FOLDER
+# MySQL Configuration
+app.config['MYSQL_HOST'] = 'localhost'
+app.config['MYSQL_USER'] = 'root'
+app.config['MYSQL_PASSWORD'] = ''
+app.config['MYSQL_DB'] = 'dms_db'
 
-google_bp = make_google_blueprint(
-    client_id="YOUR_CLIENT_ID",
-    client_secret="YOUR_CLIENT_SECRET",
-    scope=[
-        "openid",
-        "https://www.googleapis.com/auth/userinfo.email",
-        "https://www.googleapis.com/auth/userinfo.profile"
-    ]
-)
+mysql = MySQL(app)
 
-app.register_blueprint(
-    google_bp,
-    url_prefix="/google_login"
-)
+UPLOAD_FOLDER = 'static/uploads'
+app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 
-app.secret_key = "agriculture_secret_key"
-UPLOAD_FOLDER = "static/uploads"
-app.config["UPLOAD_FOLDER"] = UPLOAD_FOLDER
+def log_activity(user_id, username, action,
+                 document_id=None,
+                 document_title=None):
 
-# -------------------------
-# LOGIN
-# -------------------------
-@app.route("/", methods=["GET", "POST"])
-def login():
+    cur = mysql.connection.cursor()
 
-    if request.method == "POST":
+    cur.execute("""
+        INSERT INTO activity_logs
+        (user_id,username,action,
+         document_id,document_title,
+         ip_address)
+        VALUES(%s,%s,%s,%s,%s,%s)
+    """,(
+        user_id,
+        username,
+        action,
+        document_id,
+        document_title,
+        request.remote_addr
+    ))
 
-        username = request.form["username"]
-        password = request.form["password"]
+    mysql.connection.commit()
+    
+@app.route('/register', methods=['GET','POST'])
+def register():
 
-        conn = get_db_connection()
-        cursor = conn.cursor(dictionary=True)
+    if request.method == 'POST':
 
-        cursor.execute(
-            "SELECT * FROM users WHERE username=%s",
-            (username,)
+        fullname = request.form['fullname']
+        username = request.form['username']
+        email = request.form['email']
+        password = generate_password_hash(
+            request.form['password']
         )
 
-        user = cursor.fetchone()
+        cur = mysql.connection.cursor()
 
-        if user and user["password"] == password:
+        cur.execute("""
+            INSERT INTO users
+            (fullname,username,email,password)
+            VALUES(%s,%s,%s,%s)
+        """,(fullname,username,email,password))
 
-            session["user_id"] = user["id"]
-            session["fullname"] = user["fullname"]
-            session["role"] = user["role"]
+        mysql.connection.commit()
 
-            # Activity Log
-            cursor.execute(
-                """
-                INSERT INTO activity_logs
-                (user_id, action, description)
-                VALUES (%s, %s, %s)
-                """,
-                (
-                    user["id"],
-                    "LOGIN",
+        flash("Registration Successful")
+
+        return redirect(url_for('login'))
+
+    return render_template('register.html')
+
+@app.route('/', methods=['GET','POST'])
+@app.route('/login', methods=['GET','POST'])
+def login():
+
+    if request.method == 'POST':
+
+        username = request.form['username']
+        password = request.form['password']
+
+        cur = mysql.connection.cursor()
+
+        cur.execute(
+            "SELECT * FROM users WHERE username=%s",
+            [username]
+        )
+
+        user = cur.fetchone()
+
+        if user:
+
+            if check_password_hash(
+                user[4],
+                password
+            ):
+
+                session['user_id'] = user[0]
+                session['username'] = user[2]
+                session['role'] = user[5]
+
+                log_activity(
+                    user[0],
+                    user[2],
                     "User Logged In"
                 )
-            )
 
-            conn.commit()
-
-            cursor.close()
-            conn.close()
-
-            return redirect("/dashboard")
-
-        cursor.close()
-        conn.close()
+                return redirect(url_for('dashboard'))
 
         flash("Invalid Username or Password")
 
-    return render_template("login.html")
-# -------------------------
-# DASHBOARD
-# -------------------------
-@app.route("/dashboard")
+    return render_template('login.html')
+
+@app.route('/dashboard')
 def dashboard():
 
-    if "user_id" not in session:
-        return redirect("/")
+    cur = mysql.connection.cursor()
 
-    conn = get_db_connection()
-    cursor = conn.cursor(dictionary=True)
-
-    cursor.execute("SELECT COUNT(*) total FROM documents")
-    total_documents = cursor.fetchone()["total"]
-
-    cursor.execute(
-        "SELECT COUNT(*) total FROM documents WHERE status='Active'"
+    cur.execute(
+        "SELECT COUNT(*) FROM documents"
     )
-    active_documents = cursor.fetchone()["total"]
+    total_docs = cur.fetchone()[0]
 
-    cursor.execute(
-        "SELECT COUNT(*) total FROM documents WHERE status='Archived'"
+    cur.execute(
+        "SELECT COUNT(*) FROM users"
     )
-    archived_documents = cursor.fetchone()["total"]
+    total_users = cur.fetchone()[0]
 
-    cursor.execute("SELECT COUNT(*) total FROM users")
-    total_users = cursor.fetchone()["total"]
-
-    cursor.close()
-    conn.close()
-
-    return render_template(
-        "dashboard.html",
-        total_documents=total_documents,
-        active_documents=active_documents,
-        archived_documents=archived_documents,
-        total_users=total_users
-    )
-    
-@app.route("/users")
-def users():
-
-    if "user_id" not in session:
-        return redirect("/")
-
-    conn = get_db_connection()
-    cursor = conn.cursor(dictionary=True)
-
-    cursor.execute("SELECT * FROM users")
-
-    users = cursor.fetchall()
-
-    cursor.close()
-    conn.close()
-
-    return render_template(
-        "users.html",
-        users=users
-    )
-    
-@app.route("/activity_logs")
-def activity_logs():
-
-    if "user_id" not in session:
-        return redirect("/")
-
-    conn = get_db_connection()
-    cursor = conn.cursor(dictionary=True)
-
-    cursor.execute("""
-        SELECT activity_logs.*,
-               users.fullname
+    cur.execute("""
+        SELECT username,action,activity_time
         FROM activity_logs
-        LEFT JOIN users
-        ON activity_logs.user_id = users.id
-        ORDER BY activity_logs.id DESC
+        ORDER BY id DESC
+        LIMIT 10
     """)
 
-    logs = cursor.fetchall()
-
-    cursor.close()
-    conn.close()
+    logs = cur.fetchall()
 
     return render_template(
-        "activity_logs.html",
+        'dashboard.html',
+        total_docs=total_docs,
+        total_users=total_users,
         logs=logs
     )
     
-@app.route("/documents")
-def documents():
+@app.route('/upload_document', methods=['GET', 'POST'])
+def upload_document():
 
-    if "user_id" not in session:
-        return redirect("/")
+    if 'user_id' not in session:
+        return redirect(url_for('login'))
 
-    conn = get_db_connection()
-    cursor = conn.cursor(dictionary=True)
+    cur = mysql.connection.cursor()
 
-    cursor.execute("""
-        SELECT documents.*,
-               categories.category_name
-        FROM documents
-        LEFT JOIN categories
-        ON documents.category_id = categories.id
-        ORDER BY documents.id DESC
-    """)
-    documents = cursor.fetchall()
+    if request.method == 'POST':
 
-    cursor.execute("""
-        SELECT *
-        FROM categories
-        ORDER BY category_name
-    """)
-    categories = cursor.fetchall()
+        title = request.form['title']
+        description = request.form['description']
+        category_id = request.form['category_id']
 
-    cursor.close()
-    conn.close()
+        file = request.files['document']
+
+        if file and file.filename != '':
+
+            filename = secure_filename(file.filename)
+
+            filepath = os.path.join(
+                app.config['UPLOAD_FOLDER'],
+                filename
+            )
+
+            file.save(filepath)
+
+            cur.execute("""
+                INSERT INTO documents
+                (title,description,category_id,
+                 file_name,file_path,uploaded_by)
+                VALUES(%s,%s,%s,%s,%s,%s)
+            """,
+            (
+                title,
+                description,
+                category_id,
+                filename,
+                filepath,
+                session['user_id']
+            ))
+
+            mysql.connection.commit()
+
+            document_id = cur.lastrowid
+
+            log_activity(
+                session['user_id'],
+                session['username'],
+                "Uploaded Document",
+                document_id,
+                title
+            )
+
+            flash("Document uploaded successfully")
+
+            return redirect(url_for('documents'))
+
+    cur.execute("SELECT * FROM categories")
+    categories = cur.fetchall()
 
     return render_template(
-        "documents.html",
-        documents=documents,
+        'upload_document.html',
         categories=categories
     )
     
-@app.route("/upload_document", methods=["POST"])
-def upload_document():
+@app.route('/documents')
+def documents():
 
-    if "user_id" not in session:
-        return redirect("/")
+    if 'user_id' not in session:
+        return redirect(url_for('login'))
 
-    file = request.files["file"]
+    cur = mysql.connection.cursor()
 
-    if file and file.filename:
+    cur.execute("""
+        SELECT d.id,
+               d.title,
+               d.description,
+               c.category_name,
+               d.file_name,
+               d.upload_date
+        FROM documents d
+        LEFT JOIN categories c
+        ON d.category_id = c.id
+        ORDER BY d.id DESC
+    """)
 
-        filename = secure_filename(file.filename)
+    documents = cur.fetchall()
 
-        file.save(
-            os.path.join(
-                app.config["UPLOAD_FOLDER"],
-                filename
-            )
+    return render_template(
+        'documents.html',
+        documents=documents
+    )
+    
+@app.route('/download/<int:id>')
+def download_document(id):
+
+    if 'user_id' not in session:
+        return redirect(url_for('login'))
+
+    cur = mysql.connection.cursor()
+
+    cur.execute("""
+        SELECT file_path,title
+        FROM documents
+        WHERE id=%s
+    """, [id])
+
+    document = cur.fetchone()
+
+    if document:
+
+        log_activity(
+            session['user_id'],
+            session['username'],
+            "Downloaded Document",
+            id,
+            document[1]
         )
 
-        conn = get_db_connection()
-        cursor = conn.cursor()
+        return send_file(
+            document[0],
+            as_attachment=True
+        )
 
-        cursor.execute("""
-    INSERT INTO documents
-    (
-        document_no,
-        title,
-        category_id,
-        filename,
-        original_filename,
-        status,
-        uploaded_by
-    )
-    VALUES (%s,%s,%s,%s,%s,%s,%s)
-""",
-(
-    request.form["document_no"],
-    request.form["title"],
-    request.form["category_id"],
-    filename,
-    file.filename,
-    "Active",
-    session["user_id"]
-))
-        
-        # Activity Log - Upload Document
-    cursor.execute("""
-    INSERT INTO activity_logs
-    (user_id, action, description)
-    VALUES (%s, %s, %s)
-""",
-(
-    session["user_id"],
-    "UPLOAD",
-    f"Uploaded document: {request.form['title']}"
-))
-    
-    cursor.execute("""
-    INSERT INTO activity_logs
-    (user_id, action, description)
-    VALUES (%s,%s,%s)
-""",
-(
-    session["user_id"],
-    "UPLOAD",
-    f"Uploaded document: {request.form['title']}"
-))
+    flash("Document not found")
+    return redirect(url_for('documents'))
 
-    conn.commit()
+@app.route('/delete_document/<int:id>')
+def delete_document(id):
 
-    cursor.close()
-    conn.close()
+    if 'user_id' not in session:
+        return redirect(url_for('login'))
 
-    flash("Document uploaded successfully.")
+    if session['role'] != 'admin':
+        flash("Access Denied")
+        return redirect(url_for('documents'))
 
-    return redirect("/documents")
+    cur = mysql.connection.cursor()
 
-@app.route("/download/<int:document_id>")
-def download_document(document_id):
+    cur.execute("""
+        SELECT title
+        FROM documents
+        WHERE id=%s
+    """, [id])
 
-    if "user_id" not in session:
-        return redirect("/")
+    doc = cur.fetchone()
 
-    conn = get_db_connection()
-    cursor = conn.cursor(dictionary=True)
+    if doc:
 
-    cursor.execute(
-        "SELECT * FROM documents WHERE id=%s",
-        (document_id,)
-    )
+        cur.execute(
+            "DELETE FROM documents WHERE id=%s",
+            [id]
+        )
 
-    document = cursor.fetchone()
+        mysql.connection.commit()
 
-    cursor.close()
-    conn.close()
+        log_activity(
+            session['user_id'],
+            session['username'],
+            "Deleted Document",
+            id,
+            doc[0]
+        )
 
-    if not document:
-        flash("Document not found.")
-        return redirect("/documents")
+    flash("Document deleted")
 
-    return send_from_directory(
-        app.config["UPLOAD_FOLDER"],
-        document["filename"],
-        as_attachment=True
-    )
-    
-@app.route("/logout")
+    return redirect(url_for('documents'))
+
+@app.route('/logout')
 def logout():
 
-    if "user_id" in session:
+    if 'user_id' in session:
 
-        conn = get_db_connection()
-        cursor = conn.cursor()
-
-        cursor.execute("""
-            INSERT INTO activity_logs
-            (user_id, action, description)
-            VALUES (%s, %s, %s)
-        """,
-        (
-            session["user_id"],
-            "LOGOUT",
+        log_activity(
+            session['user_id'],
+            session['username'],
             "User Logged Out"
-        ))
-
-        conn.commit()
-
-        cursor.close()
-        conn.close()
+        )
 
     session.clear()
 
-    return redirect("/")
+    return redirect(url_for('login'))
 
-if __name__ == "__main__":
-=======
-import os
-
-os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = "1"
-os.environ["OAUTHLIB_RELAX_TOKEN_SCOPE"] = "1"
-
-from waitress import serve
-from flask import (
-    Flask, render_template, request,
-    redirect, session, flash,
-    send_from_directory, url_for
-)
-
-from flask_dance.contrib.google import (
-    make_google_blueprint, google
-)
-
-from werkzeug.utils import secure_filename
-from config import get_db_connection
-
-# CREATE FLASK APP FIRST
-app = Flask(__name__)
-
-app.secret_key = "agriculture_secret_key"
-
-UPLOAD_FOLDER = "static/uploads"
-app.config["UPLOAD_FOLDER"] = UPLOAD_FOLDER
-
-google_bp = make_google_blueprint(
-    client_id="YOUR_CLIENT_ID",
-    client_secret="YOUR_CLIENT_SECRET",
-    scope=[
-        "openid",
-        "https://www.googleapis.com/auth/userinfo.email",
-        "https://www.googleapis.com/auth/userinfo.profile"
-    ]
-)
-
-app.register_blueprint(
-    google_bp,
-    url_prefix="/google_login"
-)
-
-app.secret_key = "agriculture_secret_key"
-UPLOAD_FOLDER = "static/uploads"
-app.config["UPLOAD_FOLDER"] = UPLOAD_FOLDER
-
-# -------------------------
-# LOGIN
-# -------------------------
-@app.route("/", methods=["GET", "POST"])
-def login():
-
-    if request.method == "POST":
-
-        username = request.form["username"]
-        password = request.form["password"]
-
-        conn = get_db_connection()
-        cursor = conn.cursor(dictionary=True)
-
-        cursor.execute(
-            "SELECT * FROM users WHERE username=%s",
-            (username,)
-        )
-
-        user = cursor.fetchone()
-
-        if user and user["password"] == password:
-
-            session["user_id"] = user["id"]
-            session["fullname"] = user["fullname"]
-            session["role"] = user["role"]
-
-            # Activity Log
-            cursor.execute(
-                """
-                INSERT INTO activity_logs
-                (user_id, action, description)
-                VALUES (%s, %s, %s)
-                """,
-                (
-                    user["id"],
-                    "LOGIN",
-                    "User Logged In"
-                )
-            )
-
-            conn.commit()
-
-            cursor.close()
-            conn.close()
-
-            return redirect("/dashboard")
-
-        cursor.close()
-        conn.close()
-
-        flash("Invalid Username or Password")
-
-    return render_template("login.html")
-# -------------------------
-# DASHBOARD
-# -------------------------
-@app.route("/dashboard")
-def dashboard():
-
-    if "user_id" not in session:
-        return redirect("/")
-
-    conn = get_db_connection()
-    cursor = conn.cursor(dictionary=True)
-
-    cursor.execute("SELECT COUNT(*) total FROM documents")
-    total_documents = cursor.fetchone()["total"]
-
-    cursor.execute(
-        "SELECT COUNT(*) total FROM documents WHERE status='Active'"
-    )
-    active_documents = cursor.fetchone()["total"]
-
-    cursor.execute(
-        "SELECT COUNT(*) total FROM documents WHERE status='Archived'"
-    )
-    archived_documents = cursor.fetchone()["total"]
-
-    cursor.execute("SELECT COUNT(*) total FROM users")
-    total_users = cursor.fetchone()["total"]
-
-    cursor.close()
-    conn.close()
-
-    return render_template(
-        "dashboard.html",
-        total_documents=total_documents,
-        active_documents=active_documents,
-        archived_documents=archived_documents,
-        total_users=total_users
-    )
-    
-@app.route("/users")
-def users():
-
-    if "user_id" not in session:
-        return redirect("/")
-
-    conn = get_db_connection()
-    cursor = conn.cursor(dictionary=True)
-
-    cursor.execute("SELECT * FROM users")
-
-    users = cursor.fetchall()
-
-    cursor.close()
-    conn.close()
-
-    return render_template(
-        "users.html",
-        users=users
-    )
-    
-@app.route("/activity_logs")
+@app.route('/activity_logs')
 def activity_logs():
 
-    if "user_id" not in session:
-        return redirect("/")
+    if 'user_id' not in session:
+        return redirect(url_for('login'))
 
-    conn = get_db_connection()
-    cursor = conn.cursor(dictionary=True)
+    cur = mysql.connection.cursor()
 
-    cursor.execute("""
-        SELECT activity_logs.*,
-               users.fullname
+    cur.execute("""
+        SELECT username,
+               action,
+               document_title,
+               ip_address,
+               activity_time
         FROM activity_logs
-        LEFT JOIN users
-        ON activity_logs.user_id = users.id
-        ORDER BY activity_logs.id DESC
+        ORDER BY id DESC
     """)
 
-    logs = cursor.fetchall()
-
-    cursor.close()
-    conn.close()
+    logs = cur.fetchall()
 
     return render_template(
-        "activity_logs.html",
+        'activity_logs.html',
         logs=logs
     )
     
-@app.route("/documents")
-def documents():
-
-    if "user_id" not in session:
-        return redirect("/")
-
-    conn = get_db_connection()
-    cursor = conn.cursor(dictionary=True)
-
-    cursor.execute("""
-        SELECT documents.*,
-               categories.category_name
-        FROM documents
-        LEFT JOIN categories
-        ON documents.category_id = categories.id
-        ORDER BY documents.id DESC
-    """)
-    documents = cursor.fetchall()
-
-    cursor.execute("""
-        SELECT *
-        FROM categories
-        ORDER BY category_name
-    """)
-    categories = cursor.fetchall()
-
-    cursor.close()
-    conn.close()
-
-    return render_template(
-        "documents.html",
-        documents=documents,
-        categories=categories
-    )
-    
-@app.route("/upload_document", methods=["POST"])
-def upload_document():
-
-    if "user_id" not in session:
-        return redirect("/")
-
-    file = request.files["file"]
-
-    if file and file.filename:
-
-        filename = secure_filename(file.filename)
-
-        file.save(
-            os.path.join(
-                app.config["UPLOAD_FOLDER"],
-                filename
-            )
-        )
-
-        conn = get_db_connection()
-        cursor = conn.cursor()
-
-        cursor.execute("""
-    INSERT INTO documents
-    (
-        document_no,
-        title,
-        category_id,
-        filename,
-        original_filename,
-        status,
-        uploaded_by
-    )
-    VALUES (%s,%s,%s,%s,%s,%s,%s)
-""",
-(
-    request.form["document_no"],
-    request.form["title"],
-    request.form["category_id"],
-    filename,
-    file.filename,
-    "Active",
-    session["user_id"]
-))
-        
-        # Activity Log - Upload Document
-    cursor.execute("""
-    INSERT INTO activity_logs
-    (user_id, action, description)
-    VALUES (%s, %s, %s)
-""",
-(
-    session["user_id"],
-    "UPLOAD",
-    f"Uploaded document: {request.form['title']}"
-))
-    
-    cursor.execute("""
-    INSERT INTO activity_logs
-    (user_id, action, description)
-    VALUES (%s,%s,%s)
-""",
-(
-    session["user_id"],
-    "UPLOAD",
-    f"Uploaded document: {request.form['title']}"
-))
-
-    conn.commit()
-
-    cursor.close()
-    conn.close()
-
-    flash("Document uploaded successfully.")
-
-    return redirect("/documents")
-
-@app.route("/download/<int:document_id>")
-def download_document(document_id):
-
-    if "user_id" not in session:
-        return redirect("/")
-
-    conn = get_db_connection()
-    cursor = conn.cursor(dictionary=True)
-
-    cursor.execute(
-        "SELECT * FROM documents WHERE id=%s",
-        (document_id,)
-    )
-
-    document = cursor.fetchone()
-
-    cursor.close()
-    conn.close()
-
-    if not document:
-        flash("Document not found.")
-        return redirect("/documents")
-
-    return send_from_directory(
-        app.config["UPLOAD_FOLDER"],
-        document["filename"],
-        as_attachment=True
-    )
-    
-@app.route("/logout")
-def logout():
-
-    if "user_id" in session:
-
-        conn = get_db_connection()
-        cursor = conn.cursor()
-
-        cursor.execute("""
-            INSERT INTO activity_logs
-            (user_id, action, description)
-            VALUES (%s, %s, %s)
-        """,
-        (
-            session["user_id"],
-            "LOGOUT",
-            "User Logged Out"
-        ))
-
-        conn.commit()
-
-        cursor.close()
-        conn.close()
-
-    session.clear()
-
-    return redirect("/")
-
 if __name__ == "__main__":
->>>>>>> a72cffaba9099136b3b23b3b7f422b5cd19dd79b
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    app.run(debug=True)
